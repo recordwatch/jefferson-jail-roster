@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { HashRouter, Routes, Route, Link } from 'react-router-dom'
 import Header from './components/Header'
+import ContactFooter from './components/ContactFooter'
 import StatBar from './components/StatBar'
 import BookingCard from './components/BookingCard'
 import HistoryLog from './components/HistoryLog'
@@ -176,6 +177,7 @@ export default function App() {
         <Route path="/history" element={<HistoryPage />} />
         <Route path="/stats" element={<StatsPage />} />
       </Routes>
+      <ContactFooter />
     </HashRouter>
   )
 }
