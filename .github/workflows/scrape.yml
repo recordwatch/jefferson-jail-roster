@@ -8,6 +8,12 @@ on:
 permissions:
   contents: write
 
+# GitHub's schedule and the manual/cron-job.org trigger can start runs at the
+# same moment; queue them so two runs never push at once.
+concurrency:
+  group: scrape
+  cancel-in-progress: false
+
 jobs:
   scrape-and-deploy:
     runs-on: ubuntu-latest
@@ -23,34 +29,71 @@ jobs:
         with:
           node-version: '20'
 
+      # A failed install or scrape doesn't end the run here. The health step
+      # below decides whether it's been broken long enough to fail (and email).
       - name: Install scraper dependencies
+        id: install
+        continue-on-error: true
         run: npm install
 
       - name: Run scraper
+        id: scrape
+        continue-on-error: true
         run: node scrape.js
+
+      - name: Record scraper health
+        id: health
+        run: |
+          if [ "${{ steps.install.outcome }}" = success ] && [ "${{ steps.scrape.outcome }}" = success ]; then
+            bash .github/scripts/scrape-health.sh success
+          else
+            # Keep the last good data, not whatever a failed run half-wrote.
+            git checkout -- data/ 2>/dev/null || true
+            git clean -fdq data/ 2>/dev/null || true
+            bash .github/scripts/scrape-health.sh failure
+          fi
 
       - name: Copy data to frontend public
         run: |
           mkdir -p frontend/public/data
           cp data/*.json frontend/public/data/
 
+      # Building, committing and publishing never fail the run: a hiccup here
+      # leaves the data in place and the next run tries again.
       - name: Install frontend dependencies
+        continue-on-error: true
         run: cd frontend && npm install
 
       - name: Build frontend
+        id: build
+        continue-on-error: true
         run: cd frontend && npm run build
 
       - name: Commit data files
+        continue-on-error: true
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/
+          git add data/ .github/scrape-health.json
           git diff --cached --quiet || git commit -m "chore: update data [skip ci]"
-          git pull --no-rebase -X ours
-          git push
+          for attempt in 0 1 2 3; do
+            if [ "$attempt" -gt 0 ]; then
+              echo "Push rejected -- retry $attempt of 3 after pulling the newer commit"
+              sleep $((attempt * 5))
+            fi
+            git pull --no-rebase -X ours
+            if git push; then exit 0; fi
+          done
+          echo "::warning::Push still rejected after 3 retries; the next run will push this data"
 
       - name: Deploy to GitHub Pages
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./frontend/dist
+
+      - name: Fail if the scraper has been broken for 24 hours
+        if: steps.health.outputs.fail == 'true'
+        run: exit 1
